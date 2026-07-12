@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 
 # ---------------------------------------------------------------- config
@@ -28,7 +29,7 @@ INPUT_PATH = os.environ.get("INPUT_PATH", "/input/tasks.json")
 OUTPUT_PATH = os.environ.get("OUTPUT_PATH", "/output/results.json")
 
 API_KEY = os.environ.get("GEMINI_API_KEY", "")
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview")
 API_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     f"{MODEL}:generateContent"
@@ -38,7 +39,7 @@ ALL_STYLES = ["formal", "sarcastic", "humorous_tech", "humorous_non_tech"]
 
 N_FRAMES = 8            # frames sampled per clip
 FRAME_WIDTH = 512       # downscale: keeps upload fast, plenty for the judge
-MAX_WORKERS = 6         # clips processed concurrently
+MAX_WORKERS = 2         # free-tier Gemini rate limits: keep this LOW
 DOWNLOAD_TIMEOUT = 120
 FFMPEG_TIMEOUT = 90
 API_TIMEOUT = 90
@@ -154,6 +155,7 @@ def call_gemini(frame_paths):
             "temperature": 0.7,
             "responseMimeType": "application/json",
             "maxOutputTokens": 4096,
+            "thinkingConfig": {"thinkingBudget": 0},
         },
     }).encode()
 
@@ -166,7 +168,20 @@ def call_gemini(frame_paths):
     with urllib.request.urlopen(req, timeout=API_TIMEOUT) as r:
         payload = json.loads(r.read().decode())
 
-    text = payload["candidates"][0]["content"]["parts"][0]["text"]
+    cand = payload["candidates"][0]
+    finish = cand.get("finishReason")
+
+    # Gemini 3 may emit internal "thought" parts and may split the answer
+    # across several parts. Join every non-thought text part.
+    text = "".join(
+        p["text"] for p in cand.get("content", {}).get("parts", [])
+        if "text" in p and not p.get("thought")
+    )
+    if not text:
+        raise RuntimeError(f"empty response (finishReason={finish})")
+    if finish == "MAX_TOKENS":
+        raise RuntimeError("response truncated (MAX_TOKENS)")
+
     return parse_captions(text)
 
 
@@ -216,16 +231,28 @@ def process(task):
             log(f"{tid}: {len(frames)} frames -> model")
 
             caps = {}
-            for attempt in (1, 2):
+            for attempt in (1, 2, 3, 4):
                 try:
                     caps = call_gemini(frames)
                     if all(s in caps for s in styles):
                         break
+                except urllib.error.HTTPError as e:
+                    if e.code == 429:                       # rate limited
+                        wait = min(20 * attempt, remaining() - 40)
+                        log(f"{tid}: rate limited, backing off {wait:.0f}s")
+                        if wait <= 0:
+                            break
+                        time.sleep(wait)
+                        continue
+                    log(f"{tid}: attempt {attempt} failed: {e}")
+                    if attempt == 4 or remaining() < 40:
+                        break
+                    time.sleep(3)
                 except Exception as e:
                     log(f"{tid}: attempt {attempt} failed: {e}")
-                    if attempt == 2 or remaining() < 40:
+                    if attempt == 4 or remaining() < 40:
                         break
-                    time.sleep(2)
+                    time.sleep(3)
 
         if not all(s in caps for s in styles):
             missing = [s for s in styles if s not in caps]
