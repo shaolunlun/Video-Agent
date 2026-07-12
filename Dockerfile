@@ -14,7 +14,7 @@ COPY agent.py .
 # NOTE: the image is public. Use a throwaway key and revoke it after judging.
 ARG GEMINI_API_KEY=""
 ENV GEMINI_API_KEY=${GEMINI_API_KEY}
-ENV GEMINI_MODEL="gemini-2.5-flash"
+ENV GEMINI_MODEL="gemini-3.1-flash-lite"
 ENV PYTHONUNBUFFERED=1
 
 CMD ["python", "agent.py"]
