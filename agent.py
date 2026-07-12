@@ -153,7 +153,7 @@ def call_gemini(frame_paths):
         "generationConfig": {
             "temperature": 0.7,
             "responseMimeType": "application/json",
-            "maxOutputTokens": 800,
+            "maxOutputTokens": 4096,
         },
     }).encode()
 
